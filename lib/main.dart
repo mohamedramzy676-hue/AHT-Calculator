@@ -97,7 +97,7 @@ class _DashboardPageState extends State<DashboardPage> {
     if (result != null) { setState(() { monthCalls = result[0]; monthSeconds = result[1]; monthRemainingCalls = result[2]; }); await _save(); }
   }
 
-  void openCalculator() => Navigator.push(context, MaterialPageRoute(builder: (_) => const AhtCalculatorPage()));
+  void openCalculator() => Navigator.push(context, MaterialPageRoute(builder: (_) => AhtCalculatorPage(targetSeconds: targetSeconds)));
 
   @override
   Widget build(BuildContext context) {
@@ -114,7 +114,7 @@ class _DashboardPageState extends State<DashboardPage> {
         const SizedBox(height: 12),
         Row(children: [Expanded(child: _MetricCard(label: 'Calls', value: '${calls.length}', icon: Icons.call)), const SizedBox(width: 12), Expanded(child: _MetricCard(label: 'Handling', value: formatSeconds(totalSeconds), icon: Icons.timer_outlined))]),
         const SizedBox(height: 16),
-        Card(child: ListTile(onTap: openCalculator, leading: const CircleAvatar(child: Icon(Icons.calculate_outlined)), title: const Text('Quick AHT Calculator', style: TextStyle(fontWeight: FontWeight.bold)), subtitle: const Text('Enter several call durations and instantly calculate their AHT.'), trailing: const Icon(Icons.chevron_right))),
+        Card(child: ListTile(onTap: openCalculator, leading: const CircleAvatar(child: Icon(Icons.calculate_outlined)), title: const Text('Quick AHT Calculator', style: TextStyle(fontWeight: FontWeight.bold)), subtitle: const Text('Enter call times and track your AHT in seconds against your target.'), trailing: const Icon(Icons.chevron_right))),
         const SizedBox(height: 16),
         _PlanCard(title: 'Daily Target Rescue', subtitle: '$expectedRemainingCalls calls remaining', message: rescue == null ? 'Add calls and set remaining calls to calculate your pace.' : rescue < 0 ? 'Target cannot be reached with the selected number of calls.' : 'Keep the next $expectedRemainingCalls calls at ${formatSeconds(rescue)} AHT or less.', onEdit: editPlan),
         const SizedBox(height: 28),
