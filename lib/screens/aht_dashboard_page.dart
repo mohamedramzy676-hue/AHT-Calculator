@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -79,15 +80,30 @@ class _AhtDashboardPageState extends State<AhtDashboardPage> {
   final TextEditingController quickMinutes = TextEditingController();
   final TextEditingController quickSeconds = TextEditingController();
 
+  final TextEditingController remainingCallsController =
+      TextEditingController();
+
+  final TextEditingController expectedAhtController = TextEditingController();
+
   final FocusNode quickMinutesFocus = FocusNode();
   final FocusNode quickSecondsFocus = FocusNode();
+
+  int? plannedRemainingCalls;
+  double? requiredFutureAht;
+
+  int? requiredCalls;
+  int? expectedFutureAht;
+  String? requiredCallsMessage;
 
   List<CallEntry> get calls {
     return data.putIfAbsent(selectedMonth, () => []);
   }
 
   int get totalSeconds {
-    return calls.fold<int>(0, (sum, call) => sum + call.total);
+    return calls.fold<int>(
+      0,
+      (sum, call) => sum + call.total,
+    );
   }
 
   int get aht {
@@ -98,14 +114,17 @@ class _AhtDashboardPageState extends State<AhtDashboardPage> {
   int? get lastChange {
     if (calls.length < 2) return null;
 
-    final previousTotal = calls
-        .take(calls.length - 1)
-        .fold<int>(0, (sum, call) => sum + call.total);
+    final previousTotal = calls.take(calls.length - 1).fold<int>(
+          0,
+          (sum, call) => sum + call.total,
+        );
 
     final previousAht = (previousTotal / (calls.length - 1)).round();
 
     return aht - previousAht;
   }
+
+  int get targetDifference => aht - target;
 
   @override
   void initState() {
@@ -117,8 +136,12 @@ class _AhtDashboardPageState extends State<AhtDashboardPage> {
   void dispose() {
     quickMinutes.dispose();
     quickSeconds.dispose();
+    remainingCallsController.dispose();
+    expectedAhtController.dispose();
+
     quickMinutesFocus.dispose();
     quickSecondsFocus.dispose();
+
     super.dispose();
   }
 
@@ -157,7 +180,10 @@ class _AhtDashboardPageState extends State<AhtDashboardPage> {
   Future<void> _save() async {
     final prefs = await SharedPreferences.getInstance();
 
-    await prefs.setInt('target_seconds', target);
+    await prefs.setInt(
+      'target_seconds',
+      target,
+    );
 
     await prefs.setString(
       'aht_month_$selectedMonth',
@@ -174,8 +200,144 @@ class _AhtDashboardPageState extends State<AhtDashboardPage> {
     return '$minutes:${remainingSeconds.toString().padLeft(2, '0')}';
   }
 
+  String mmssFromDouble(double seconds) {
+    if (seconds <= 0) return '0:00';
+    return mmss(seconds.round());
+  }
+
+  void resetCalculators() {
+    setState(() {
+      plannedRemainingCalls = null;
+      requiredFutureAht = null;
+
+      requiredCalls = null;
+      expectedFutureAht = null;
+      requiredCallsMessage = null;
+    });
+  }
+
+  void resetAllPlanning() {
+    setState(() {
+      remainingCallsController.clear();
+      expectedAhtController.clear();
+
+      plannedRemainingCalls = null;
+      requiredFutureAht = null;
+
+      requiredCalls = null;
+      expectedFutureAht = null;
+      requiredCallsMessage = null;
+    });
+  }
+
+  void calculateRequiredAht() {
+    final remaining = int.tryParse(
+      remainingCallsController.text.trim(),
+    );
+
+    if (remaining == null || remaining <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Enter a valid number of remaining calls.',
+          ),
+        ),
+      );
+      return;
+    }
+
+    if (calls.isEmpty) {
+      setState(() {
+        plannedRemainingCalls = remaining;
+        requiredFutureAht = target.toDouble();
+      });
+      return;
+    }
+
+    final requiredTotalAtEnd = target * (calls.length + remaining);
+
+    final secondsAvailableForFutureCalls = requiredTotalAtEnd - totalSeconds;
+
+    setState(() {
+      plannedRemainingCalls = remaining;
+
+      requiredFutureAht = secondsAvailableForFutureCalls / remaining;
+    });
+  }
+
+  void calculateRequiredCalls() {
+    final expected = int.tryParse(
+      expectedAhtController.text.trim(),
+    );
+
+    if (expected == null || expected <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Enter a valid expected AHT.',
+          ),
+        ),
+      );
+      return;
+    }
+
+    setState(() {
+      expectedFutureAht = expected;
+      requiredCalls = null;
+      requiredCallsMessage = null;
+    });
+
+    if (calls.isEmpty) {
+      setState(() {
+        if (expected <= target) {
+          requiredCalls = 0;
+          requiredCallsMessage =
+              'Start tracking your calls. An average of $expected sec (${mmss(expected)}) is within your $target sec (${mmss(target)}) target.';
+        } else {
+          requiredCallsMessage =
+              'An expected AHT of $expected sec (${mmss(expected)}) is above your $target sec (${mmss(target)}) target.';
+        }
+      });
+      return;
+    }
+
+    if (aht <= target) {
+      setState(() {
+        requiredCalls = 0;
+        requiredCallsMessage =
+            'You are already within target at $aht sec (${mmss(aht)}). No recovery calls are required.';
+      });
+      return;
+    }
+
+    if (expected >= target) {
+      setState(() {
+        requiredCallsMessage =
+            'Recovery is not possible with an expected AHT of $expected sec (${mmss(expected)}). Your future-call average must be below the $target sec (${mmss(target)}) target.';
+      });
+      return;
+    }
+
+    final excessSeconds = totalSeconds - (target * calls.length);
+
+    final improvementPerFutureCall = target - expected;
+
+    final callsNeeded = max(
+      0,
+      (excessSeconds / improvementPerFutureCall).ceil(),
+    );
+
+    setState(() {
+      requiredCalls = callsNeeded;
+
+      requiredCallsMessage =
+          'You need at least $callsNeeded calls averaging $expected sec (${mmss(expected)}) or less to reach $target sec (${mmss(target)}).';
+    });
+  }
+
   Future<void> quickAdd() async {
     final minutes = int.tryParse(quickMinutes.text.trim()) ?? 0;
+
     final seconds = int.tryParse(quickSeconds.text.trim()) ?? 0;
 
     if (minutes < 0 ||
@@ -203,6 +365,8 @@ class _AhtDashboardPageState extends State<AhtDashboardPage> {
         ),
       );
     });
+
+    resetCalculators();
 
     quickMinutes.clear();
     quickSeconds.clear();
@@ -270,7 +434,9 @@ class _AhtDashboardPageState extends State<AhtDashboardPage> {
 
                   return Expanded(
                     child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 6),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 6,
+                      ),
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -364,8 +530,14 @@ class _AhtDashboardPageState extends State<AhtDashboardPage> {
                   );
                 }
 
-                if (result.reduce((a, b) => a + b) > 0) {
-                  Navigator.pop(context, result);
+                if (result.reduce(
+                      (a, b) => a + b,
+                    ) >
+                    0) {
+                  Navigator.pop(
+                    context,
+                    result,
+                  );
                 }
               },
               child: Text(
@@ -392,6 +564,8 @@ class _AhtDashboardPageState extends State<AhtDashboardPage> {
         );
       });
 
+      resetCalculators();
+
       await _save();
 
       if (mounted) {
@@ -415,6 +589,8 @@ class _AhtDashboardPageState extends State<AhtDashboardPage> {
         );
       });
 
+      resetCalculators();
+
       await _save();
     }
   }
@@ -423,6 +599,8 @@ class _AhtDashboardPageState extends State<AhtDashboardPage> {
     setState(() {
       calls.removeAt(index);
     });
+
+    resetCalculators();
 
     await _save();
 
@@ -435,6 +613,8 @@ class _AhtDashboardPageState extends State<AhtDashboardPage> {
     setState(() {
       calls.clear();
     });
+
+    resetAllPlanning();
 
     await _save();
 
@@ -472,7 +652,10 @@ class _AhtDashboardPageState extends State<AhtDashboardPage> {
                 final value = int.tryParse(controller.text);
 
                 if (value != null && value > 0) {
-                  Navigator.pop(context, value);
+                  Navigator.pop(
+                    context,
+                    value,
+                  );
                 }
               },
               child: const Text('Save'),
@@ -486,6 +669,8 @@ class _AhtDashboardPageState extends State<AhtDashboardPage> {
       setState(() {
         target = result;
       });
+
+      resetAllPlanning();
 
       await _save();
     }
@@ -534,18 +719,390 @@ class _AhtDashboardPageState extends State<AhtDashboardPage> {
     );
   }
 
+  Widget targetStatus() {
+    if (calls.isEmpty) {
+      return Row(
+        children: [
+          const CircleAvatar(
+            child: Icon(Icons.track_changes),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Target Assistant',
+                  style: TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 5),
+                Text(
+                  'Add your first call to start tracking progress toward $target sec (${mmss(target)}).',
+                ),
+              ],
+            ),
+          ),
+        ],
+      );
+    }
+
+    final difference = targetDifference;
+    final withinTarget = difference <= 0;
+
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        CircleAvatar(
+          child: Icon(
+            withinTarget
+                ? Icons.check_circle_outline
+                : Icons.warning_amber_rounded,
+          ),
+        ),
+        const SizedBox(width: 14),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Target Assistant',
+                style: TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 5),
+              Text(
+                withinTarget
+                    ? 'You are ${difference.abs()} seconds below target!'
+                    : 'You are ${difference.abs()} seconds above target.',
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  color: withinTarget ? Colors.green : Colors.red,
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                'Current AHT: $aht sec (${mmss(aht)}) • Target: $target sec (${mmss(target)})',
+              ),
+            ],
+          ),
+        ),
+        Container(
+          padding: const EdgeInsets.symmetric(
+            horizontal: 18,
+            vertical: 12,
+          ),
+          decoration: BoxDecoration(
+            color: withinTarget ? Colors.green.shade100 : Colors.red.shade100,
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                withinTarget ? Icons.emoji_events : Icons.trending_up,
+                color: withinTarget ? Colors.green : Colors.red,
+              ),
+              const SizedBox(width: 8),
+              Text(
+                withinTarget ? 'Keep it up!' : 'Recovery needed',
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: withinTarget
+                      ? Colors.green.shade800
+                      : Colors.red.shade800,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget requiredCallsCalculator() {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(
+          alpha: 0.72,
+        ),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: Colors.blue.shade100,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              CircleAvatar(
+                child: Icon(Icons.groups),
+              ),
+              SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '1. How many calls do I need?',
+                      style: TextStyle(
+                        fontSize: 17,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    Text(
+                      'Enter the AHT you expect for your upcoming calls.',
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: expectedAhtController,
+                  keyboardType: TextInputType.number,
+                  inputFormatters: [
+                    FilteringTextInputFormatter.digitsOnly,
+                  ],
+                  onSubmitted: (_) => calculateRequiredCalls(),
+                  decoration: const InputDecoration(
+                    labelText: 'Expected AHT (sec)',
+                    hintText: 'e.g. 400',
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              FilledButton.icon(
+                onPressed: calculateRequiredCalls,
+                icon: const Icon(
+                  Icons.calculate,
+                ),
+                label: const Text('Calculate'),
+              ),
+            ],
+          ),
+          if (requiredCallsMessage != null) ...[
+            const SizedBox(height: 14),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: Colors.blue.shade50,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Row(
+                children: [
+                  const Icon(
+                    Icons.track_changes,
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      requiredCallsMessage!,
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget requiredAhtCalculator() {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(
+          alpha: 0.72,
+        ),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: Colors.blue.shade100,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              CircleAvatar(
+                child: Icon(Icons.calculate),
+              ),
+              SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '2. What AHT do I need?',
+                      style: TextStyle(
+                        fontSize: 17,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    Text(
+                      'Enter how many calls you expect to take next.',
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: remainingCallsController,
+                  keyboardType: TextInputType.number,
+                  inputFormatters: [
+                    FilteringTextInputFormatter.digitsOnly,
+                  ],
+                  onSubmitted: (_) => calculateRequiredAht(),
+                  decoration: const InputDecoration(
+                    labelText: 'Remaining calls',
+                    hintText: 'e.g. 20',
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              FilledButton.icon(
+                onPressed: calculateRequiredAht,
+                icon: const Icon(
+                  Icons.calculate,
+                ),
+                label: const Text('Calculate'),
+              ),
+            ],
+          ),
+          if (requiredFutureAht != null) ...[
+            const SizedBox(height: 14),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: Colors.blue.shade50,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: requiredFutureAht! <= 0
+                  ? const Text(
+                      'Your current buffer is already large enough for this plan.',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w600,
+                      ),
+                    )
+                  : Text(
+                      'For the next $plannedRemainingCalls calls, average ${requiredFutureAht!.round()} sec (${mmssFromDouble(requiredFutureAht!)}) or less per call to finish at $target sec (${mmss(target)}).',
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget targetAssistant() {
+    final withinTarget = calls.isEmpty || aht <= target;
+
+    return Card(
+      color: withinTarget ? const Color(0xffeffaf3) : const Color(0xfffff5f2),
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          children: [
+            targetStatus(),
+            const Divider(height: 28),
+            LayoutBuilder(
+              builder: (
+                context,
+                constraints,
+              ) {
+                if (constraints.maxWidth < 850) {
+                  return Column(
+                    children: [
+                      requiredCallsCalculator(),
+                      const SizedBox(height: 12),
+                      requiredAhtCalculator(),
+                    ],
+                  );
+                }
+
+                return Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(
+                      child: requiredCallsCalculator(),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: requiredAhtCalculator(),
+                    ),
+                  ],
+                );
+              },
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                const Icon(
+                  Icons.info_outline,
+                  size: 18,
+                ),
+                const SizedBox(width: 8),
+                const Expanded(
+                  child: Text(
+                    'Use either calculator to plan your upcoming calls.',
+                  ),
+                ),
+                TextButton.icon(
+                  onPressed: resetAllPlanning,
+                  icon: const Icon(Icons.refresh),
+                  label: const Text('Reset'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget quickTimeInput() {
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(14),
-        child: Row(
+        child: Wrap(
+          spacing: 12,
+          runSpacing: 12,
+          crossAxisAlignment: WrapCrossAlignment.center,
           children: [
             const Icon(
               Icons.bolt,
               color: Colors.amber,
               size: 30,
             ),
-            const SizedBox(width: 10),
             const Text(
               'Quick Call Time',
               style: TextStyle(
@@ -553,7 +1110,6 @@ class _AhtDashboardPageState extends State<AhtDashboardPage> {
                 fontWeight: FontWeight.bold,
               ),
             ),
-            const SizedBox(width: 20),
             SizedBox(
               width: 110,
               child: TextField(
@@ -564,7 +1120,9 @@ class _AhtDashboardPageState extends State<AhtDashboardPage> {
                 keyboardType: TextInputType.number,
                 inputFormatters: [
                   FilteringTextInputFormatter.digitsOnly,
-                  LengthLimitingTextInputFormatter(2),
+                  LengthLimitingTextInputFormatter(
+                    2,
+                  ),
                 ],
                 onChanged: moveToSeconds,
                 onSubmitted: (_) {
@@ -578,16 +1136,11 @@ class _AhtDashboardPageState extends State<AhtDashboardPage> {
                 ),
               ),
             ),
-            const Padding(
-              padding: EdgeInsets.symmetric(
-                horizontal: 12,
-              ),
-              child: Text(
-                ':',
-                style: TextStyle(
-                  fontSize: 32,
-                  fontWeight: FontWeight.bold,
-                ),
+            const Text(
+              ':',
+              style: TextStyle(
+                fontSize: 32,
+                fontWeight: FontWeight.bold,
               ),
             ),
             SizedBox(
@@ -599,7 +1152,9 @@ class _AhtDashboardPageState extends State<AhtDashboardPage> {
                 keyboardType: TextInputType.number,
                 inputFormatters: [
                   FilteringTextInputFormatter.digitsOnly,
-                  LengthLimitingTextInputFormatter(2),
+                  LengthLimitingTextInputFormatter(
+                    2,
+                  ),
                 ],
                 onSubmitted: (_) {
                   quickAdd();
@@ -612,26 +1167,165 @@ class _AhtDashboardPageState extends State<AhtDashboardPage> {
                 ),
               ),
             ),
-            const SizedBox(width: 12),
             FilledButton.icon(
               onPressed: quickAdd,
               icon: const Icon(Icons.add),
               label: const Text('Add'),
             ),
-            const SizedBox(width: 8),
             TextButton.icon(
               onPressed: addDetailed,
               icon: const Icon(Icons.tune),
               label: const Text('Add Hold / ACW'),
             ),
-            const Spacer(),
-            const Text(
-              'Enter call time and press Enter',
-              style: TextStyle(
-                color: Colors.black54,
-              ),
-            ),
           ],
+        ),
+      ),
+    );
+  }
+
+  Widget callsTable() {
+    if (calls.isEmpty) {
+      return Card(
+        child: Padding(
+          padding: const EdgeInsets.all(32),
+          child: Center(
+            child: Text(
+              'No calls yet. Enter minutes and seconds above.',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(10),
+        child: SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: DataTable(
+            columns: const [
+              DataColumn(label: Text('#')),
+              DataColumn(
+                label: Text('Call Time'),
+              ),
+              DataColumn(label: Text('Hold')),
+              DataColumn(label: Text('ACW')),
+              DataColumn(
+                label: Text('Total (Sec)'),
+              ),
+              DataColumn(
+                label: Text('AHT MTD'),
+              ),
+              DataColumn(
+                label: Text('Change'),
+              ),
+              DataColumn(
+                label: Text('Actions'),
+              ),
+            ],
+            rows: List.generate(
+              calls.length,
+              (index) {
+                final call = calls[index];
+
+                final runningTotal = calls.take(index + 1).fold<int>(
+                      0,
+                      (sum, item) => sum + item.total,
+                    );
+
+                final runningAht = (runningTotal / (index + 1)).round();
+
+                int? previousAht;
+
+                if (index > 0) {
+                  final previousTotal = calls.take(index).fold<int>(
+                        0,
+                        (sum, item) => sum + item.total,
+                      );
+
+                  previousAht = (previousTotal / index).round();
+                }
+
+                final rowChange =
+                    previousAht == null ? null : runningAht - previousAht;
+
+                return DataRow(
+                  cells: [
+                    DataCell(
+                      Text('${index + 1}'),
+                    ),
+                    DataCell(
+                      Text(
+                        mmss(call.talk),
+                        style: const TextStyle(
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                    DataCell(
+                      Text(mmss(call.hold)),
+                    ),
+                    DataCell(
+                      Text(mmss(call.acw)),
+                    ),
+                    DataCell(
+                      Text(
+                        '${call.total}',
+                        style: const TextStyle(
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                    DataCell(
+                      Text('$runningAht sec'),
+                    ),
+                    DataCell(
+                      Text(
+                        rowChange == null
+                            ? '-'
+                            : '${rowChange > 0 ? '+' : ''}$rowChange ${rowChange > 0 ? '↑' : rowChange < 0 ? '↓' : ''}',
+                        style: TextStyle(
+                          color: rowChange == null
+                              ? null
+                              : rowChange <= 0
+                                  ? Colors.green
+                                  : Colors.red,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                    DataCell(
+                      Row(
+                        children: [
+                          IconButton(
+                            onPressed: () {
+                              editCall(index);
+                            },
+                            tooltip: 'Edit',
+                            icon: const Icon(
+                              Icons.edit,
+                              color: Colors.blue,
+                            ),
+                          ),
+                          IconButton(
+                            onPressed: () {
+                              deleteCall(index);
+                            },
+                            tooltip: 'Delete',
+                            icon: const Icon(
+                              Icons.delete_outline,
+                              color: Colors.red,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                );
+              },
+            ),
+          ),
         ),
       ),
     );
@@ -677,7 +1371,30 @@ class _AhtDashboardPageState extends State<AhtDashboardPage> {
                       fontWeight: FontWeight.bold,
                     ),
                   ),
+                  const SizedBox(width: 18),
+                  Text(
+                    'Track Smarter  •  Perform Better',
+                    style: TextStyle(
+                      color: Colors.white.withValues(
+                        alpha: 0.7,
+                      ),
+                    ),
+                  ),
                   const Spacer(),
+                  const Text(
+                    'Developed by ',
+                    style: TextStyle(
+                      color: Colors.white70,
+                    ),
+                  ),
+                  const Text(
+                    'Mohamed Ramzy',
+                    style: TextStyle(
+                      color: Colors.lightBlueAccent,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(width: 22),
                   OutlinedButton.icon(
                     onPressed: editTarget,
                     icon: const Icon(
@@ -713,6 +1430,8 @@ class _AhtDashboardPageState extends State<AhtDashboardPage> {
                           selectedMonth = index;
                         });
 
+                        resetAllPlanning();
+
                         quickMinutes.clear();
                         quickSeconds.clear();
 
@@ -731,7 +1450,10 @@ class _AhtDashboardPageState extends State<AhtDashboardPage> {
                 10,
               ),
               child: LayoutBuilder(
-                builder: (context, constraints) {
+                builder: (
+                  context,
+                  constraints,
+                ) {
                   return GridView.count(
                     crossAxisCount: constraints.maxWidth > 900 ? 4 : 2,
                     shrinkWrap: true,
@@ -804,8 +1526,14 @@ class _AhtDashboardPageState extends State<AhtDashboardPage> {
                     ),
                     child: Column(
                       children: [
+                        targetAssistant(),
+                        const SizedBox(
+                          height: 10,
+                        ),
                         quickTimeInput(),
-                        const SizedBox(height: 10),
+                        const SizedBox(
+                          height: 10,
+                        ),
                         Row(
                           children: [
                             Text(
@@ -832,214 +1560,25 @@ class _AhtDashboardPageState extends State<AhtDashboardPage> {
                               ),
                           ],
                         ),
-                        const SizedBox(height: 8),
-                        if (calls.isEmpty)
-                          Card(
-                            child: Padding(
-                              padding: const EdgeInsets.all(
-                                32,
-                              ),
-                              child: Center(
-                                child: Text(
-                                  'No calls yet. Enter minutes and seconds above.',
-                                  style:
-                                      Theme.of(context).textTheme.titleMedium,
-                                ),
-                              ),
-                            ),
-                          )
-                        else
-                          Card(
-                            child: Padding(
-                              padding: const EdgeInsets.all(
-                                10,
-                              ),
-                              child: SingleChildScrollView(
-                                scrollDirection: Axis.horizontal,
-                                child: DataTable(
-                                  columns: const [
-                                    DataColumn(
-                                      label: Text('#'),
-                                    ),
-                                    DataColumn(
-                                      label: Text('Call Time'),
-                                    ),
-                                    DataColumn(
-                                      label: Text('Hold'),
-                                    ),
-                                    DataColumn(
-                                      label: Text('ACW'),
-                                    ),
-                                    DataColumn(
-                                      label: Text(
-                                        'Total (Sec)',
-                                      ),
-                                    ),
-                                    DataColumn(
-                                      label: Text('AHT MTD'),
-                                    ),
-                                    DataColumn(
-                                      label: Text('Change'),
-                                    ),
-                                    DataColumn(
-                                      label: Text('Actions'),
-                                    ),
-                                  ],
-                                  rows: List.generate(
-                                    calls.length,
-                                    (index) {
-                                      final call = calls[index];
-
-                                      final runningTotal = calls
-                                          .take(
-                                            index + 1,
-                                          )
-                                          .fold<int>(
-                                            0,
-                                            (
-                                              sum,
-                                              item,
-                                            ) =>
-                                                sum + item.total,
-                                          );
-
-                                      final runningAht =
-                                          (runningTotal / (index + 1)).round();
-
-                                      int? previousAht;
-
-                                      if (index > 0) {
-                                        final previousTotal = calls
-                                            .take(
-                                              index,
-                                            )
-                                            .fold<int>(
-                                              0,
-                                              (
-                                                sum,
-                                                item,
-                                              ) =>
-                                                  sum + item.total,
-                                            );
-
-                                        previousAht =
-                                            (previousTotal / index).round();
-                                      }
-
-                                      final rowChange = previousAht == null
-                                          ? null
-                                          : runningAht - previousAht;
-
-                                      return DataRow(
-                                        cells: [
-                                          DataCell(
-                                            Text(
-                                              '${index + 1}',
-                                            ),
-                                          ),
-                                          DataCell(
-                                            Text(
-                                              mmss(
-                                                call.talk,
-                                              ),
-                                              style: const TextStyle(
-                                                fontWeight: FontWeight.bold,
-                                              ),
-                                            ),
-                                          ),
-                                          DataCell(
-                                            Text(
-                                              mmss(
-                                                call.hold,
-                                              ),
-                                            ),
-                                          ),
-                                          DataCell(
-                                            Text(
-                                              mmss(
-                                                call.acw,
-                                              ),
-                                            ),
-                                          ),
-                                          DataCell(
-                                            Text(
-                                              '${call.total}',
-                                              style: const TextStyle(
-                                                fontWeight: FontWeight.bold,
-                                              ),
-                                            ),
-                                          ),
-                                          DataCell(
-                                            Text(
-                                              '$runningAht sec',
-                                            ),
-                                          ),
-                                          DataCell(
-                                            Text(
-                                              rowChange == null
-                                                  ? '-'
-                                                  : '${rowChange > 0 ? '+' : ''}$rowChange ${rowChange > 0 ? '↑' : rowChange < 0 ? '↓' : ''}',
-                                              style: TextStyle(
-                                                color: rowChange == null
-                                                    ? null
-                                                    : rowChange <= 0
-                                                        ? Colors.green
-                                                        : Colors.red,
-                                                fontWeight: FontWeight.bold,
-                                              ),
-                                            ),
-                                          ),
-                                          DataCell(
-                                            Row(
-                                              children: [
-                                                IconButton(
-                                                  onPressed: () {
-                                                    editCall(
-                                                      index,
-                                                    );
-                                                  },
-                                                  tooltip: 'Edit',
-                                                  icon: const Icon(
-                                                    Icons.edit,
-                                                    color: Colors.blue,
-                                                  ),
-                                                ),
-                                                IconButton(
-                                                  onPressed: () {
-                                                    deleteCall(
-                                                      index,
-                                                    );
-                                                  },
-                                                  tooltip: 'Delete',
-                                                  icon: const Icon(
-                                                    Icons.delete_outline,
-                                                    color: Colors.red,
-                                                  ),
-                                                ),
-                                              ],
-                                            ),
-                                          ),
-                                        ],
-                                      );
-                                    },
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ),
-                        const SizedBox(height: 12),
+                        const SizedBox(
+                          height: 8,
+                        ),
+                        callsTable(),
+                        const SizedBox(
+                          height: 12,
+                        ),
                         Card(
                           child: Padding(
-                            padding: const EdgeInsets.all(
-                              18,
-                            ),
+                            padding: const EdgeInsets.all(18),
                             child: Row(
                               children: [
                                 const Icon(
                                   Icons.emoji_events_outlined,
                                   size: 32,
                                 ),
-                                const SizedBox(width: 12),
+                                const SizedBox(
+                                  width: 12,
+                                ),
                                 Expanded(
                                   child: Text(
                                     'Monthly Summary • ${calls.length} calls • $totalSeconds sec • ${calls.isEmpty ? 'No AHT yet' : 'AHT MTD $aht sec (${mmss(aht)})'}',
